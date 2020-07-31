@@ -1,0 +1,155 @@
+---
+title: "Course Project - Practical Machine Learning"
+author: "jbh"
+date: "June 2, 2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(dplyr)
+```
+
+# Classifying Movement - Doing it "The Right Way"
+
+For this project, we use a data set that was already parsed into training and test sets.  We will do all modeling on the training set only, and then see how well our models do in predicting outcomes on the test set.
+
+Thanks to the folks at [Human Activity Recognition]( http://groupware.les.inf.puc-rio.br/har) who made their data available for use! Their associated paper is in the references at the end.
+
+The data set contains various measurements from sensors in a subject and on a dumbell, while performing dumbell curls five different ways - one correct and four intentionally incorrect.  We seek a model to accurately classify the type of dumbell curl based on the sensor readings.
+
+# Load and Explore the Data
+
+```{r}
+training <- read.csv("pml-training.csv", row.names = 1, header = TRUE)
+testing <- read.csv("pml-testing.csv", row.names = 1, header = TRUE)
+```
+
+Above we load the training and testing data sets.  We see with a quick glance at the first few rows of testing that many columns contain missing values. To assess the scale of the problem below, we build the following table.  
+
+```{r}
+na_counts_training <- apply(apply(training, 2, is.na),2,sum)
+table(na_counts_training)
+percent_missing <- max(na_counts_training)/dim(training)[1]
+```
+```{r}
+na_counts_testing <- apply(apply(testing, 2, is.na),2,sum)
+table(na_counts_testing)
+percent_missing_testing <- max(na_counts_testing)/dim(testing)[1]
+```
+
+Note this means 92 variables have no missing values, while 67 are missing `r round(100*percent_missing,1)` percent.  For now we will discard these variables with mostly missing values.  We may bring them in later to help refine classification models. We keep the same column names in our test set.  Note we first saved the complete training and test sets under other names. The code immediately below also counts the type of the 92 retained variables - 37 factors, 28 integers, and 27 doubles.
+
+```{r}
+# initial exploration of data.
+training_factors <- sapply(sapply(training, is.factor),sum)
+training_factors <- training_factors[training_factors==1]
+# 37 factor variables, including the response 'classe'
+training_ints <- sapply(sapply(training, is.integer),sum)
+training_ints <- training_ints[training_ints==1]
+# 28 integer variables
+training_doubles <- sapply(sapply(training, is.double),sum)
+training_doubles <- training_doubles[training_doubles==1]
+# 27 doubles
+```
+
+```{r}
+keepers<-names(na_counts_training)[which(na_counts_training==0)]
+big_training <- training
+training <- training[,names(training) %in% keepers]
+```
+
+```{r}
+big_testing <- testing
+testing <- testing[,names(testing) %in% keepers]
+```
+
+# Computational challenges
+
+We attempted several different methods to analyze this data, but most were too computationally intensive for the computer in use.  We initially tried a classification and regression tree.  This worked (produced a result), but likely because we discarded some variables above, this produced a classification into only four variables when we are given there are five classes.  When offering the entire data set (all variables and observations), even a basic regression tree exceeded the computational power on the computer.  After letting the machine run for two hours, the process was terminated and the error message showed the machine was out of memory.
+
+We also attempted random forests, and boosting.  However, in every case we ran into computational limits on the machine.  To work around this, we chose ultimately to do a basic clustering algorithm.  
+
+# K Nearest Neighbors
+
+Though K Nearest Neighbors (knn) is not the most sophisticated algorithm, it had two key advantages in this case:  First, we are given the value for K - we know there are five categories in the data set. Second, it is computationally light weight compared to many other machine learning algorithms.  Furthermore, knowing we want exactly five clusters reduces the computational burden again, as knn is usually run on a range of values for the number of clusters, while here we could set k = 5.
+
+The distinct disadvantage of knn is that it requires numeric input exclusively.  In our data set, many of the variables are factors.  In some cases it is possible to convert these to a numeric scale.  This is not always appropriate, though.  Converting "low", "medium" and "high" to values 1, 2, and 3, respectively preserves ordering, but may not be on the appropriate scale. 
+
+To address this disadvantage, we simply started by training the model using only the variables that were "true" numeric values.  We had significant concerns this would be too little data, but decided it was at least a good place to start.
+
+Unsurprisingly, the knn algorithm solved fairly quickly - just a few minutes of computation.  We were pleasantly surprised that the accuracy was reported at just over 95% - even after excluding much of the data!
+
+After a couple of additional attempts at more complicated algorithms, we decided knn using only the numeric data (and only the columns without missing data) was sufficient for these purposes.
+
+# The algorithms and output
+
+Below is the code we ran for both the classification tree and for the knn.  At the end, we predict the classifications for the 20 observations in the training set.
+
+```{r, error=FALSE, warning=FALSE}
+ts_doubles <- training %>% select(one_of(c(names(training_doubles),"classe")))
+
+```
+
+```{r}
+library(rpart)
+library(rpart.plot)
+m1 <- rpart(classe ~., ts_doubles, parms = list(split = "gini"))  
+rpart.plot(m1)
+```
+
+
+```{r}
+knn_fit2 <- train(classe ~., data = ts_doubles, method = "knn",  preProcess = c("center", "scale"),
+ tuneGrid = expand.grid(k=5))
+knn_fit2$results
+```
+
+```{r}
+predict(knn_fit2, testing)
+```
+# Cross Validation
+
+To improve our basic knn model, we add k-fold cross validation and search for a model that perhaps has higher accuracy than the 95.3% achieved above.
+
+```{r}
+trControl <- trainControl(method = "cv", number = 5)
+set.seed(12345)
+knn_cv <- train(classe ~., 
+                data = ts_doubles, 
+                method = "knn",  
+                trControl = trControl,
+                preProcess = c("center", "scale"),
+                tuneGrid = expand.grid(k=5), 
+                metric = "Accuracy")
+knn_cv$results
+```
+```{r}
+predict(knn_cv, testing)
+```
+
+It's interesting to note that the two predictions are identical, element by element.  However, the cross-validation did increase the accuracy slightly, bringing it to 96%.
+
+# Eliminated code
+
+The following code blocks are some examples of other attempts described above that failed.  They are included for reference but not executed.
+
+# This causes computer to crash - out of memory
+trctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+set.seed(3333)
+knn_fit <- train(classe ~., data = ts_doubles, method = "knn",
+ trControl=trctrl,
+ preProcess = c("center", "scale"),
+ tuneLength = 20)
+ 
+# Using all training data doesn't work because knn requires numeric data only
+knn_fit3 <- train(classe ~., data = training, method = "knn",
+ preProcess = c("center", "scale"),
+ tuneGrid = expand.grid(k=5))
+
+References:
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
